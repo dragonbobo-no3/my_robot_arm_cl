@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypes="xmlschema"?>
+<package format="3">
+  <name>my_robot_arm_cb_library</name>
+  <version>1.0.0</version>
+  <description>Custom client behaviors for my_robot_arm state machine</description>
+  <maintainer email="user@todo.todo">User</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>smacc2</depend>
+  <depend>cl_moveit2z</depend>
+  <depend>cl_keyboard</depend>
+  <depend>cl_ros2_timer</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
