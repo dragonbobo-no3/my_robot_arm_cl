@@ -21,6 +21,7 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <future>
 #include <map>
 #include <sstream>
@@ -66,6 +67,105 @@ public:
   virtual void onExit() override {}
 
 protected:
+  bool executePlanInterruptible(
+    moveit::planning_interface::MoveGroupInterface & moveGroupInterface,
+    const moveit::planning_interface::MoveGroupInterface::Plan & computedMotionPlan)
+  {
+    auto executionFuture = std::async(
+      std::launch::async,
+      [&]()
+      {
+        return moveGroupInterface.execute(computedMotionPlan);
+      });
+
+    using namespace std::chrono_literals;
+    while (rclcpp::ok())
+    {
+      auto status = executionFuture.wait_for(20ms);
+      if (status == std::future_status::ready)
+      {
+        auto executionResult = executionFuture.get();
+        return executionResult == moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
+      }
+
+      if (this->isShutdownRequested())
+      {
+        RCLCPP_WARN(
+          getLogger(),
+          "[CbMoveJoints] Shutdown requested while executing trajectory. Calling MoveIt stop().");
+        moveGroupInterface.stop();
+
+        auto postStopStatus = executionFuture.wait_for(2s);
+        if (postStopStatus == std::future_status::ready)
+        {
+          auto executionResult = executionFuture.get();
+          return executionResult == moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
+        }
+
+        RCLCPP_WARN(
+          getLogger(),
+          "[CbMoveJoints] Trajectory did not finish shortly after stop(). Marking execution as failed.");
+        return false;
+      }
+
+      rclcpp::sleep_for(20ms);
+    }
+
+    moveGroupInterface.stop();
+    return false;
+  }
+
+  bool executePlanWithExecutorInterruptible(
+    CpTrajectoryExecutor * trajectoryExecutor,
+    const moveit::planning_interface::MoveGroupInterface::Plan & computedMotionPlan,
+    const ExecutionOptions & execOptions,
+    std::string & errorMessage)
+  {
+    auto executionFuture = std::async(
+      std::launch::async,
+      [&]()
+      {
+        return trajectoryExecutor->executePlan(computedMotionPlan, execOptions);
+      });
+
+    using namespace std::chrono_literals;
+    while (rclcpp::ok())
+    {
+      auto status = executionFuture.wait_for(20ms);
+      if (status == std::future_status::ready)
+      {
+        auto execResult = executionFuture.get();
+        errorMessage = execResult.errorMessage;
+        return execResult.success;
+      }
+
+      if (this->isShutdownRequested())
+      {
+        RCLCPP_WARN(
+          getLogger(),
+          "[CbMoveJoints] Shutdown requested while executing trajectory. Calling executor cancel().");
+        trajectoryExecutor->cancel();
+
+        auto postCancelStatus = executionFuture.wait_for(2s);
+        if (postCancelStatus == std::future_status::ready)
+        {
+          auto execResult = executionFuture.get();
+          errorMessage = execResult.errorMessage;
+          return execResult.success;
+        }
+
+        errorMessage = "Execution cancelled due to shutdown request";
+        return false;
+      }
+
+      rclcpp::sleep_for(20ms);
+    }
+
+    trajectoryExecutor->cancel();
+    errorMessage = "Execution aborted because ROS is shutting down";
+    return false;
+  }
+
   static std::string currentJointStatesToString(
     moveit::planning_interface::MoveGroupInterface & moveGroupInterface,
     std::map<std::string, double> & targetJoints)
@@ -175,8 +275,9 @@ protected:
           execOptions.maxVelocityScaling = *scalingFactor_;
         }
 
-        auto execResult = trajectoryExecutor->executePlan(computedMotionPlan, execOptions);
-        executionSuccess = execResult.success;
+        std::string errorMessage;
+        executionSuccess = executePlanWithExecutorInterruptible(
+          trajectoryExecutor, computedMotionPlan, execOptions, errorMessage);
 
         if (executionSuccess)
         {
@@ -186,7 +287,7 @@ protected:
         {
           RCLCPP_WARN(
             getLogger(), "[CbMoveJoints] Execution failed (via CpTrajectoryExecutor): %s",
-            execResult.errorMessage.c_str());
+            errorMessage.c_str());
         }
       }
       else
@@ -197,8 +298,7 @@ protected:
           "[CbMoveJoints] CpTrajectoryExecutor component not available, using legacy execution "
           "(consider adding CpTrajectoryExecutor component)");
 
-        auto executionResult = moveGroupInterface.execute(computedMotionPlan);
-        executionSuccess = (executionResult == moveit_msgs::msg::MoveItErrorCodes::SUCCESS);
+        executionSuccess = executePlanInterruptible(moveGroupInterface, computedMotionPlan);
 
         RCLCPP_INFO(
           getLogger(), "[CbMoveJoints] Execution %s (legacy mode)",
