@@ -22,6 +22,7 @@
 // BASIC MANIPULATION BEHAVIORSz
 #include "client_behaviors/cb_move_end_effector.hpp"
 #include "client_behaviors/cb_move_end_effector_seeded.hpp"
+#include "client_behaviors/cb_move_end_effector_linear_seeded.hpp"
 #include "client_behaviors/cb_move_joints.hpp"
 #include "client_behaviors/cb_move_known_state.hpp"
 #include "client_behaviors/cb_move_cartesian_state.hpp"
