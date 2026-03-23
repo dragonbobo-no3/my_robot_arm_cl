@@ -38,4 +38,5 @@
 
 // GRASPING BEHAVIORS
 #include "client_behaviors/cb_attach_object.hpp"
+#include "client_behaviors/cb_ctrl_gripper.hpp"
 #include "client_behaviors/cb_detach_object.hpp"
