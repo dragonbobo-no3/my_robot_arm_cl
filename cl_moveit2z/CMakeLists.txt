@@ -15,6 +15,7 @@ find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(yaml_cpp_vendor REQUIRED)
 find_package(je_software REQUIRED)
+find_package(common REQUIRED)
 
 set(dependencies
 moveit_ros_planning_interface
@@ -24,6 +25,7 @@ smacc2
 tf2_geometry_msgs
 yaml_cpp_vendor
 je_software
+common
 )
 
 include_directories(include)
