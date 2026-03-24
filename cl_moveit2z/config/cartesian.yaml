@@ -1,0 +1,9 @@
+# Cartesian linear motion parameters (shared by all cartesian moves)
+# These params are auto-loaded by CbMoveEndEffectorLinearSeeded without needing recompilation
+
+linear_step_meters: 0.005         # IK sampling density (m) - smaller = more waypoints = smoother but slower
+planning_time_sec: 1.0            # Max planning time (seconds)
+max_segments: 200                 # Maximum waypoints in cartesian path
+jump_threshold: 0.0               # Joint-space jump threshold (0 = disabled)
+min_path_fraction: 0.98           # Min success fraction (98% = allow up to 2% partial paths to fail)
+velocity_scaling: 1.0             # Velocity scaling factor (1.0 = 100%, no slowdown from joint moves)

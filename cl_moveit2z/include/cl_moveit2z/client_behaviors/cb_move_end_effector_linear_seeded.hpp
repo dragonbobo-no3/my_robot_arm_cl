@@ -19,6 +19,7 @@
 #include <cmath>
 #include <future>
 #include <vector>
+#include <optional>
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <moveit_msgs/msg/move_it_error_codes.hpp>
@@ -27,6 +28,11 @@
 #include <smacc2/smacc_asynchronous_client_behavior.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+
+#include <yaml-cpp/yaml.h>
+#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <filesystem>
+#include <fstream>
 
 #include <cl_moveit2z/cl_moveit2z.hpp>
 
@@ -51,6 +57,7 @@ public:
   int maxSegments_{200};
   double jumpThreshold_{0.0};
   double minPathFraction_{0.98};
+  std::optional<double> velocityScaling_;  // Optional velocity scaling (resets inherited value)
 
   CbMoveEndEffectorLinearSeeded() = default;
 
@@ -70,6 +77,20 @@ public:
   {
     this->requiresClient(movegroupClient_);
     auto & mgi = *(movegroupClient_->moveGroupClientInterface);
+
+    // Auto-load cartesian motion parameters from YAML (if available)
+    // This allows tuning velocity/trajectory params without recompilation
+    loadConfigFromYaml("cl_moveit2z", "config/cartesian.yaml");
+
+    // Reset MoveGroup velocity scaling to prevent inheritance from prior joint moves
+    if (velocityScaling_)
+    {
+      mgi.setMaxVelocityScalingFactor(*velocityScaling_);
+    }
+    else
+    {
+      mgi.setMaxVelocityScalingFactor(1.0);  // Reset to 100% by default
+    }
 
     if (isShutdownRequested())
     {
@@ -184,6 +205,84 @@ public:
 
     movegroupClient_->postEventMotionExecutionSucceded();
     this->postSuccessEvent();
+  }
+
+  /**
+   * Load cartesian motion parameters from YAML file.
+   * YAML format:
+   *   linear_step_meters: 0.01
+   *   planning_time_sec: 1.0
+   *   max_segments: 200
+   *   jump_threshold: 0.0
+   *   min_path_fraction: 0.98
+   *   velocity_scaling: 1.0  # optional - sets scaling (1.0 = 100%)
+   */
+  void loadConfigFromYaml(const std::string & pkg, const std::string & filepath)
+  {
+    std::string pkgpath = ament_index_cpp::get_package_share_directory(pkg);
+
+    if (pkgpath.empty())
+    {
+      RCLCPP_ERROR_STREAM(
+        getLogger(), "[CbMoveEndEffectorLinearSeeded] package not found: " << pkg);
+      return;
+    }
+
+    std::string fullpath = pkgpath + "/" + filepath;
+
+    if (!std::filesystem::exists(fullpath))
+    {
+      RCLCPP_WARN_STREAM(getLogger(), "[CbMoveEndEffectorLinearSeeded] config file not found: " << fullpath);
+      return;
+    }
+
+    try
+    {
+      std::ifstream ifs(fullpath);
+      YAML::Node node = YAML::Load(ifs);
+
+      if (node["linear_step_meters"])
+      {
+        linearStepMeters_ = node["linear_step_meters"].as<double>();
+      }
+      if (node["planning_time_sec"])
+      {
+        planningTimeSec_ = node["planning_time_sec"].as<double>();
+      }
+      if (node["max_segments"])
+      {
+        maxSegments_ = node["max_segments"].as<int>();
+      }
+      if (node["jump_threshold"])
+      {
+        jumpThreshold_ = node["jump_threshold"].as<double>();
+      }
+      if (node["min_path_fraction"])
+      {
+        minPathFraction_ = node["min_path_fraction"].as<double>();
+      }
+      if (node["velocity_scaling"])
+      {
+        velocityScaling_ = node["velocity_scaling"].as<double>();
+      }
+
+      RCLCPP_INFO(
+        getLogger(),
+        "[CbMoveEndEffectorLinearSeeded] loaded config from %s: step=%.4f, planTime=%.2f, maxSegs=%d, jumpThresh=%.4f, minPathFrac=%.3f, velScale=%s",
+        fullpath.c_str(),
+        linearStepMeters_,
+        planningTimeSec_,
+        maxSegments_,
+        jumpThreshold_,
+        minPathFraction_,
+        velocityScaling_ ? std::to_string(*velocityScaling_).c_str() : "default(1.0)");
+    }
+    catch (const YAML::Exception & ex)
+    {
+      RCLCPP_ERROR_STREAM(
+        getLogger(),
+        "[CbMoveEndEffectorLinearSeeded] YAML error loading " << fullpath << ": " << ex.what());
+    }
   }
 
 protected:

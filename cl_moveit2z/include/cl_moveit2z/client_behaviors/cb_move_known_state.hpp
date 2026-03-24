@@ -116,18 +116,24 @@ private:
             jointStates[key] = value;
           }
 
-          return jointStates;
+          RCLCPP_INFO_STREAM(getLogger(), "Parsed " << jointStates.size() << " joint entries.");
         }
         catch (std::exception & ex)
         {
           RCLCPP_ERROR(getLogger(), "trying to convert to map, failed, errormsg: %s", ex.what());
         }
-
-        RCLCPP_INFO_STREAM(getLogger(), "Parsed " << jointStates.size() << " joint entries.");
       }
       else
       {
         RCLCPP_WARN_STREAM(getLogger(), "Couldn't find any jointStates in the provided yaml file.");
+      }
+
+      // Load optional velocity scaling factor
+      if (node["scaling_factor"])
+      {
+        scalingFactor_ = node["scaling_factor"].as<double>();
+        RCLCPP_INFO(
+          getLogger(), "[%s] scaling_factor: %.2f", getName().c_str(), *scalingFactor_);
       }
     }
     catch (const YAML::ParserException & ex)
