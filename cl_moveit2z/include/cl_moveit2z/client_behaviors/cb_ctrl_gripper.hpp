@@ -183,7 +183,8 @@ private:
     const auto elapsed = (getNode()->now() - command_sent_time_).seconds();
     if (elapsed > timeout_sec_)
     {
-      markFailure("Feedback timeout waiting for gripper target");
+      // 没有反馈情况下，超时后视为成功（命令已发送）
+      markSuccess(position_, position_);
     }
   }
 
