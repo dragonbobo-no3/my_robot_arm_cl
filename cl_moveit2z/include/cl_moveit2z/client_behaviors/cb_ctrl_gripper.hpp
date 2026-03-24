@@ -23,41 +23,55 @@ public:
 
   CbCtrlGripper(
     int mode, double position, int preset = 0, bool leftValid = true, bool rightValid = false,
-    std::string topic = "/end_effector_cmd_lr",
-    std::string feedbackTopic = "/joint_states_double_arm", double timeoutSec = 2.0,
-    double positionTolerance = 0.03)
+    std::string topic = "/end_effector_cmd_lr", double timeoutSec = 2.0,
+    std::string feedbackTopic = "/joint_states_double_arm", double positionTolerance = 0.03,
+    std::string command = "", double torque = 0.0)
   : mode_(mode),
     position_(position),
     preset_(preset),
     left_valid_(leftValid),
     right_valid_(rightValid),
     topic_(std::move(topic)),
-    feedback_topic_(std::move(feedbackTopic)),
     timeout_sec_(timeoutSec),
-    position_tolerance_(positionTolerance)
+    feedback_topic_(std::move(feedbackTopic)),
+    position_tolerance_(positionTolerance),
+    command_(normalizeCommand(command)),
+    torque_(torque)
   {
   }
 
   static CbCtrlGripper Position(
     double position, bool leftValid = true, bool rightValid = false,
     std::string topic = "/end_effector_cmd_lr",
-    std::string feedbackTopic = "/joint_states_double_arm", double timeoutSec = 2.0,
+    double timeoutSec = 2.0, std::string feedbackTopic = "/joint_states_double_arm",
     double positionTolerance = 0.03)
   {
     return CbCtrlGripper(
       je_software::msg::EndEffectorCommand::MODE_POSITION, position, 0, leftValid, rightValid,
-      std::move(topic), std::move(feedbackTopic), timeoutSec, positionTolerance);
+      std::move(topic), timeoutSec, std::move(feedbackTopic), positionTolerance);
   }
 
   static CbCtrlGripper Preset(
     int preset, bool leftValid = true, bool rightValid = false,
     std::string topic = "/end_effector_cmd_lr",
-    std::string feedbackTopic = "/joint_states_double_arm", double timeoutSec = 2.0,
+    double timeoutSec = 2.0, std::string feedbackTopic = "/joint_states_double_arm",
     double positionTolerance = 0.03)
   {
     return CbCtrlGripper(
       je_software::msg::EndEffectorCommand::MODE_PRESET, 0.0, preset, leftValid, rightValid,
-      std::move(topic), std::move(feedbackTopic), timeoutSec, positionTolerance);
+      std::move(topic), timeoutSec, std::move(feedbackTopic), positionTolerance);
+  }
+
+  static CbCtrlGripper Torque(
+    std::string command, double torque, bool leftValid = true, bool rightValid = false,
+    std::string topic = "/end_effector_cmd_lr",
+    double timeoutSec = 2.0, std::string feedbackTopic = "/joint_states_double_arm",
+    double positionTolerance = 0.03)
+  {
+    return CbCtrlGripper(
+      je_software::msg::EndEffectorCommand::MODE_TORQUE, 0.0, 0, leftValid, rightValid,
+      std::move(topic), timeoutSec, std::move(feedbackTopic), positionTolerance,
+      std::move(command), torque);
   }
 
   void onEntry() override
@@ -74,11 +88,29 @@ public:
 
     if (
       mode_ != je_software::msg::EndEffectorCommand::MODE_POSITION &&
-      mode_ != je_software::msg::EndEffectorCommand::MODE_PRESET)
+      mode_ != je_software::msg::EndEffectorCommand::MODE_PRESET &&
+      mode_ != je_software::msg::EndEffectorCommand::MODE_TORQUE)
     {
       RCLCPP_WARN(getLogger(), "[CbCtrlGripper] Invalid gripper mode: %d", mode_);
       markFailure("Invalid gripper mode");
       return;
+    }
+
+    if (mode_ == je_software::msg::EndEffectorCommand::MODE_TORQUE)
+    {
+      if (!isValidTorqueCommand(command_))
+      {
+        RCLCPP_WARN(getLogger(), "[CbCtrlGripper] Invalid torque command: '%s'", command_.c_str());
+        markFailure("Invalid torque command");
+        return;
+      }
+
+      if (!std::isfinite(torque_) || torque_ <= 0.0)
+      {
+        RCLCPP_WARN(getLogger(), "[CbCtrlGripper] Invalid torque value: %.4f", torque_);
+        markFailure("Invalid torque value");
+        return;
+      }
     }
 
     if (timeout_sec_ <= 0.0)
@@ -128,6 +160,8 @@ public:
       command.mode = mode_;
       command.position = position_;
       command.preset = preset_;
+      command.command = command_;
+      command.torque = torque_;
     };
 
     if (left_valid_)
@@ -157,9 +191,10 @@ public:
     RCLCPP_INFO(
       getLogger(),
       "[CbCtrlGripper] Published cmd topic=%s mode=%d left_valid=%d right_valid=%d position=%.4f "
-      "preset=%d feedback_topic=%s fallback_feedback_topic=%s timeout=%.2fs tol=%.4f",
-      topic_.c_str(), mode_, left_valid_, right_valid_, position_, preset_, feedback_topic_.c_str(),
-      legacy_feedback_topic_.c_str(), timeout_sec_, position_tolerance_);
+      "preset=%d command=%s torque=%.4f feedback_topic=%s fallback_feedback_topic=%s timeout=%.2fs tol=%.4f",
+      topic_.c_str(), mode_, left_valid_, right_valid_, position_, preset_, command_.c_str(),
+      torque_, feedback_topic_.c_str(), legacy_feedback_topic_.c_str(), timeout_sec_,
+      position_tolerance_);
   }
 
   void onExit() override
@@ -183,7 +218,7 @@ private:
     const auto elapsed = (getNode()->now() - command_sent_time_).seconds();
     if (elapsed > timeout_sec_)
     {
-      // 没有反馈情况下，超时后视为成功（命令已发送）
+      // 对 torque/preset 模式无法从当前位置严格反推控制是否完成，这里保留超时成功兜底。
       markSuccess(position_, position_);
     }
   }
@@ -211,9 +246,20 @@ private:
       return std::fabs(feedbackValue - position_) <= position_tolerance_;
     }
 
-    // Preset mode has no universally invertible value mapping here.
-    // At least require a valid feedback frame and non-NaN value.
+    // Preset / torque 模式当前没有统一可逆的反馈判定，至少要求收到有效反馈值。
     return std::isfinite(feedbackValue);
+  }
+
+  static std::string normalizeCommand(std::string command)
+  {
+    std::transform(command.begin(), command.end(), command.begin(), ::tolower);
+    return command;
+  }
+
+  static bool isValidTorqueCommand(const std::string & command)
+  {
+    return command == je_software::msg::EndEffectorCommand::CMD_OPEN ||
+           command == je_software::msg::EndEffectorCommand::CMD_CLOSE;
   }
 
   void markSuccess(double leftFeedback, double rightFeedback)
@@ -234,8 +280,8 @@ private:
 
     RCLCPP_INFO(
       getLogger(),
-      "[CbCtrlGripper] Feedback reached target. left=%.4f right=%.4f mode=%d target_pos=%.4f preset=%d",
-      leftFeedback, rightFeedback, mode_, position_, preset_);
+      "[CbCtrlGripper] Feedback reached target. left=%.4f right=%.4f mode=%d target_pos=%.4f preset=%d command=%s torque=%.4f",
+      leftFeedback, rightFeedback, mode_, position_, preset_, command_.c_str(), torque_);
     this->postSuccessEvent();
   }
 
@@ -265,10 +311,12 @@ private:
   bool left_valid_{true};
   bool right_valid_{false};
   std::string topic_{"/end_effector_cmd_lr"};
+  double timeout_sec_{2.0};
   std::string feedback_topic_{"/joint_states_double_arm"};
   std::string legacy_feedback_topic_{"/oculus_init_joint_state"};
-  double timeout_sec_{2.0};
   double position_tolerance_{0.03};
+  std::string command_{};
+  double torque_{0.0};
 
   bool waiting_feedback_{false};
   bool command_completed_{false};
