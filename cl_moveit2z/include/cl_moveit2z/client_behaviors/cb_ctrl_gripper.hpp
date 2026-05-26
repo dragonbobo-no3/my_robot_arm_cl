@@ -25,7 +25,7 @@ public:
     int mode, double position, int preset = 0, bool leftValid = true, bool rightValid = false,
     std::string topic = "/end_effector_cmd_lr", double timeoutSec = 2.0,
     std::string feedbackTopic = "/joint_states_double_arm", double positionTolerance = 0.03,
-    std::string command = "", double torque = 0.0)
+    std::string command = "", double torque = 0.0, bool waitForFeedback = true)
   : mode_(mode),
     position_(position),
     preset_(preset),
@@ -36,7 +36,8 @@ public:
     feedback_topic_(std::move(feedbackTopic)),
     position_tolerance_(positionTolerance),
     command_(normalizeCommand(command)),
-    torque_(torque)
+    torque_(torque),
+    wait_for_feedback_(waitForFeedback)
   {
   }
 
@@ -64,14 +65,14 @@ public:
 
   static CbCtrlGripper Torque(
     std::string command, double torque, bool leftValid = true, bool rightValid = false,
-    std::string topic = "/end_effector_cmd_lr",
-    double timeoutSec = 2.0, std::string feedbackTopic = "/joint_states_double_arm",
-    double positionTolerance = 0.03)
+    std::string topic = "/end_effector_cmd_lr", double timeoutSec = 2.0,
+    std::string feedbackTopic = "/joint_states_double_arm", double positionTolerance = 0.03,
+    bool waitForFeedback = true)
   {
     return CbCtrlGripper(
       je_software::msg::EndEffectorCommand::MODE_TORQUE, 0.0, 0, leftValid, rightValid,
       std::move(topic), timeoutSec, std::move(feedbackTopic), positionTolerance,
-      std::move(command), torque);
+      std::move(command), torque, waitForFeedback);
   }
 
   void onEntry() override
@@ -129,7 +130,15 @@ public:
         getNode()->create_publisher<je_software::msg::EndEffectorCommandLR>(topic_, rclcpp::QoS(10).reliable());
     }
 
-    if (!feedback_sub_)
+    if (publisher_->get_subscription_count() == 0)
+    {
+      RCLCPP_WARN(
+        getLogger(),
+        "[CbCtrlGripper] Topic %s has no subscribers at command dispatch time. The gripper command may be ignored.",
+        topic_.c_str());
+    }
+
+    if (wait_for_feedback_ && !feedback_sub_)
     {
       feedback_sub_ = getNode()->create_subscription<common::msg::OculusInitJointState>(
         feedback_topic_,
@@ -140,7 +149,7 @@ public:
         });
     }
 
-    if (feedback_topic_ != legacy_feedback_topic_ && !feedback_sub_legacy_)
+    if (wait_for_feedback_ && feedback_topic_ != legacy_feedback_topic_ && !feedback_sub_legacy_)
     {
       feedback_sub_legacy_ = getNode()->create_subscription<common::msg::OculusInitJointState>(
         legacy_feedback_topic_,
@@ -191,10 +200,19 @@ public:
     RCLCPP_INFO(
       getLogger(),
       "[CbCtrlGripper] Published cmd topic=%s mode=%d left_valid=%d right_valid=%d position=%.4f "
-      "preset=%d command=%s torque=%.4f feedback_topic=%s fallback_feedback_topic=%s timeout=%.2fs tol=%.4f",
-      topic_.c_str(), mode_, left_valid_, right_valid_, position_, preset_, command_.c_str(),
-      torque_, feedback_topic_.c_str(), legacy_feedback_topic_.c_str(), timeout_sec_,
+      "preset=%d command=%s torque=%.4f wait_for_feedback=%d feedback_topic=%s fallback_feedback_topic=%s timeout=%.2fs tol=%.4f",
+      topic_.c_str(), mode_, left_valid_, right_valid_, position_, preset_, command_.c_str(), torque_,
+      wait_for_feedback_, feedback_topic_.c_str(), legacy_feedback_topic_.c_str(), timeout_sec_,
       position_tolerance_);
+
+    if (!wait_for_feedback_)
+    {
+      RCLCPP_INFO(
+        getLogger(),
+        "[CbCtrlGripper] Open-loop mode enabled; command will be considered successful after %.2fs without feedback.",
+        timeout_sec_);
+    }
+
   }
 
   void onExit() override
@@ -218,8 +236,19 @@ private:
     const auto elapsed = (getNode()->now() - command_sent_time_).seconds();
     if (elapsed > timeout_sec_)
     {
-      // 对 torque/preset 模式无法从当前位置严格反推控制是否完成，这里保留超时成功兜底。
-      markSuccess(position_, position_);
+      if (!wait_for_feedback_)
+      {
+        markSuccess(position_, position_);
+      }
+      else if (mode_ == je_software::msg::EndEffectorCommand::MODE_POSITION)
+      {
+        markFailure("Timed out waiting for gripper position feedback");
+      }
+      else
+      {
+        // Preset mode cannot be inferred precisely from position feedback; keep timeout success fallback.
+        markSuccess(position_, position_);
+      }
     }
   }
 
@@ -245,21 +274,20 @@ private:
     {
       return std::fabs(feedbackValue - position_) <= position_tolerance_;
     }
-
-    // Preset / torque 模式当前没有统一可逆的反馈判定，至少要求收到有效反馈值。
+    // Preset/torque modes currently have no reversible feedback mapping; any finite feedback is acceptable.
     return std::isfinite(feedbackValue);
-  }
-
-  static std::string normalizeCommand(std::string command)
-  {
-    std::transform(command.begin(), command.end(), command.begin(), ::tolower);
-    return command;
   }
 
   static bool isValidTorqueCommand(const std::string & command)
   {
     return command == je_software::msg::EndEffectorCommand::CMD_OPEN ||
            command == je_software::msg::EndEffectorCommand::CMD_CLOSE;
+  }
+
+  static std::string normalizeCommand(std::string command)
+  {
+    std::transform(command.begin(), command.end(), command.begin(), ::tolower);
+    return command;
   }
 
   void markSuccess(double leftFeedback, double rightFeedback)
@@ -280,7 +308,9 @@ private:
 
     RCLCPP_INFO(
       getLogger(),
-      "[CbCtrlGripper] Feedback reached target. left=%.4f right=%.4f mode=%d target_pos=%.4f preset=%d command=%s torque=%.4f",
+      wait_for_feedback_ ?
+        "[CbCtrlGripper] Feedback reached target. left=%.4f right=%.4f mode=%d target_pos=%.4f preset=%d command=%s torque=%.4f" :
+        "[CbCtrlGripper] Open-loop command duration elapsed. left=%.4f right=%.4f mode=%d target_pos=%.4f preset=%d command=%s torque=%.4f",
       leftFeedback, rightFeedback, mode_, position_, preset_, command_.c_str(), torque_);
     this->postSuccessEvent();
   }
@@ -317,6 +347,7 @@ private:
   double position_tolerance_{0.03};
   std::string command_{};
   double torque_{0.0};
+  bool wait_for_feedback_{true};
 
   bool waiting_feedback_{false};
   bool command_completed_{false};
