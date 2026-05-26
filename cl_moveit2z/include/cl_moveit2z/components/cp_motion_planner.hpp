@@ -41,6 +41,8 @@ namespace cl_moveit2z
 struct PlanningOptions
 {
   std::optional<double> planningTime;
+  std::optional<int> numPlanningAttempts;
+  std::optional<bool> allowReplanning;
   std::optional<double> maxVelocityScaling;
   std::optional<double> maxAccelerationScaling;
   std::optional<std::string> planningPipelineId;
@@ -344,6 +346,16 @@ private:
     if (options.planningTime)
     {
       moveGroup.setPlanningTime(*options.planningTime);
+    }
+
+    if (options.numPlanningAttempts)
+    {
+      moveGroup.setNumPlanningAttempts(*options.numPlanningAttempts);
+    }
+
+    if (options.allowReplanning)
+    {
+      moveGroup.allowReplanning(*options.allowReplanning);
     }
 
     if (options.maxVelocityScaling)
